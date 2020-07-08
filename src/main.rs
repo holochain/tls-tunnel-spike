@@ -17,9 +17,13 @@ fn main() {
 }
 
 fn one_message() {
-    let nr = webpki::DNSNameRef::try_from_ascii_str("bla.com").unwrap();
+    let (_, _, id) = CERT.as_ref();
+
+    let nr = webpki::DNSNameRef::try_from_ascii_str(id).unwrap();
     let mut cli = rustls::ClientSession::new(&CLIENT_CONFIG, nr);
     let mut srv = rustls::ServerSession::new(&SERVER_CONFIG);
+
+    srv.set_resumption_data(b"test-resume");
 
     cli.write_all(b"cli-to-srv").unwrap();
     srv.write_all(b"srv-to-cli").unwrap();
@@ -32,6 +36,13 @@ fn one_message() {
 
     let mut buf = [0_u8; 4096];
     for i in 0..5 {
+        if let Some(s) = srv.received_resumption_data() {
+            println!("resumption-data: {}", String::from_utf8_lossy(&s));
+        }
+        if let Some(sni) = srv.get_sni_hostname() {
+            println!("sni: {}", sni);
+        }
+
         // process cipher data coming from srv
         if cli.wants_read() && cli_pre.position() < cli_pre.get_ref().len() as u64 {
             cli.read_tls(&mut cli_pre).unwrap();
@@ -74,14 +85,34 @@ fn one_message() {
 
 const ALPN_HOLO_TNL: &'static [u8] = b"holo-tnl/0";
 
-static SERVER_CONFIG: Lazy<Arc<rustls::ServerConfig>> = Lazy::new(|| {
-    let cert = rcgen::generate_simple_self_signed(
-        vec!["bla.com".into()]
-    ).unwrap();
+static CERT: Lazy<Arc<(
+    rustls::Certificate,
+    rustls::PrivateKey,
+    String,
+)>> = Lazy::new(|| {
+    let id = format!("a{}a.a{}a", nanoid::nanoid!(), nanoid::nanoid!());
+    let params = rcgen::CertificateParams::new(vec![id.clone().into()]);
+    let cert = rcgen::Certificate::from_params(params).unwrap();
     let priv_key = cert.serialize_private_key_der();
     let priv_key = rustls::PrivateKey(priv_key);
     let cert = cert.serialize_der().unwrap();
+
+    let cert_digest = blake2b_simd::Params::new()
+        .hash_length(15)
+        .to_state()
+        .update(&cert)
+        .finalize();
+    let cert_digest = base64::encode_config(
+        cert_digest,
+        base64::URL_SAFE_NO_PAD,
+    );
+    println!("cert: {} digest {:?}", cert.len(), cert_digest);
     let cert = rustls::Certificate(cert);
+    Arc::new((cert, priv_key, id))
+});
+
+static SERVER_CONFIG: Lazy<Arc<rustls::ServerConfig>> = Lazy::new(|| {
+    let (cert, priv_key, _) = CERT.as_ref();
 
     let mut server_conf = rustls::ServerConfig::with_ciphersuites(
         rustls::NoClientAuth::new(),
@@ -92,7 +123,7 @@ static SERVER_CONFIG: Lazy<Arc<rustls::ServerConfig>> = Lazy::new(|| {
             &rustls::ciphersuite::TLS13_AES_128_GCM_SHA256,
         ],
     );
-    server_conf.set_single_cert(vec![cert], priv_key).unwrap();
+    server_conf.set_single_cert(vec![cert.clone()], priv_key.clone()).unwrap();
     server_conf.set_protocols(&[ALPN_HOLO_TNL.to_vec()]);
 
     // seems to require the same back-n-forth count
