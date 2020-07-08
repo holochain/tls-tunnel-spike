@@ -167,10 +167,23 @@ impl rustls::ServerCertVerifier for SkipServerVerification {
     fn verify_server_cert(
         &self,
         _roots: &rustls::RootCertStore,
-        _presented_certs: &[rustls::Certificate],
+        presented_certs: &[rustls::Certificate],
         _dns_name: webpki::DNSNameRef,
         _ocsp_response: &[u8],
     ) -> Result<rustls::ServerCertVerified, rustls::TLSError> {
+        for c in presented_certs {
+            let cert_digest = blake2b_simd::Params::new()
+                .hash_length(15)
+                .to_state()
+                .update(&c.0)
+                .finalize();
+            let cert_digest = base64::encode_config(
+                cert_digest,
+                base64::URL_SAFE_NO_PAD,
+            );
+            println!("CHECK CERT: {} digest {:?}", c.0.len(), cert_digest);
+        }
+
         Ok(rustls::ServerCertVerified::assertion())
     }
 }
